@@ -24,6 +24,7 @@ import org.apache.rocketmq.client.producer.DefaultMQProducer;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageBatch;
 import org.apache.rocketmq.common.protocol.ResponseCode;
 
 /**
@@ -95,6 +96,15 @@ public class Validators {
         }
         // topic
         Validators.checkTopic(msg.getTopic());
+
+        if (msg instanceof MessageBatch) {
+            try {
+                msg.setBody(((MessageBatch) msg).encode());
+            } catch (Exception e) {
+                throw new MQClientException("Error in encoding message batch", e);
+            }
+        }
+
         // body
         if (null == msg.getBody()) {
             throw new MQClientException(ResponseCode.MESSAGE_ILLEGAL, "the message body is null");

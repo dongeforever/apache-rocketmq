@@ -25,7 +25,7 @@ import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 /**
  * Use short variable name to speed up FastJson deserialization process.
  */
-public class SendMessageRequestHeaderV2 implements CommandCustomHeader {
+public class SendBatchMessageRequestHeader implements CommandCustomHeader {
     @CFNotNull
     private String a; // producerGroup;
     @CFNotNull
@@ -51,44 +51,38 @@ public class SendMessageRequestHeaderV2 implements CommandCustomHeader {
 
     private Integer l; // consumeRetryTimes
 
-    @CFNullable
-    private boolean m; //batch
-
-
-    public static SendMessageRequestHeader createSendMessageRequestHeaderV1(final SendMessageRequestHeaderV2 v2) {
+    public static SendMessageRequestHeader createSendMessageRequestHeader(final SendBatchMessageRequestHeader batch) {
         SendMessageRequestHeader v1 = new SendMessageRequestHeader();
-        v1.setProducerGroup(v2.a);
-        v1.setTopic(v2.b);
-        v1.setDefaultTopic(v2.c);
-        v1.setDefaultTopicQueueNums(v2.d);
-        v1.setQueueId(v2.e);
-        v1.setSysFlag(v2.f);
-        v1.setBornTimestamp(v2.g);
-        v1.setFlag(v2.h);
-        v1.setProperties(v2.i);
-        v1.setReconsumeTimes(v2.j);
-        v1.setUnitMode(v2.k);
-        v1.setMaxReconsumeTimes(v2.l);
-        v1.setBatch(v2.m);
+        v1.setProducerGroup(batch.a);
+        v1.setTopic(batch.b);
+        v1.setDefaultTopic(batch.c);
+        v1.setDefaultTopicQueueNums(batch.d);
+        v1.setQueueId(batch.e);
+        v1.setSysFlag(batch.f);
+        v1.setBornTimestamp(batch.g);
+        v1.setFlag(batch.h);
+        v1.setProperties(batch.i);
+        v1.setReconsumeTimes(batch.j);
+        v1.setUnitMode(batch.k);
+        v1.setMaxReconsumeTimes(batch.l);
         return v1;
     }
 
-    public static SendMessageRequestHeaderV2 createSendMessageRequestHeaderV2(final SendMessageRequestHeader v1) {
-        SendMessageRequestHeaderV2 v2 = new SendMessageRequestHeaderV2();
-        v2.a = v1.getProducerGroup();
-        v2.b = v1.getTopic();
-        v2.c = v1.getDefaultTopic();
-        v2.d = v1.getDefaultTopicQueueNums();
-        v2.e = v1.getQueueId();
-        v2.f = v1.getSysFlag();
-        v2.g = v1.getBornTimestamp();
-        v2.h = v1.getFlag();
-        v2.i = v1.getProperties();
-        v2.j = v1.getReconsumeTimes();
-        v2.k = v1.isUnitMode();
-        v2.l = v1.getMaxReconsumeTimes();
-        v2.m = v1.isBatch();
-        return v2;
+    public static SendBatchMessageRequestHeader createSendBatchMessageRequestHeader(final SendMessageRequestHeader v1) {
+        SendBatchMessageRequestHeader batch = new SendBatchMessageRequestHeader();
+        batch.a = v1.getProducerGroup();
+        batch.b = v1.getTopic();
+        batch.c = v1.getDefaultTopic();
+        batch.d = v1.getDefaultTopicQueueNums();
+        batch.e = v1.getQueueId();
+        batch.f = v1.getSysFlag();
+        batch.g = v1.getBornTimestamp();
+        batch.h = v1.getFlag();
+        batch.i = v1.getProperties();
+        batch.j = v1.getReconsumeTimes();
+        batch.k = v1.isUnitMode();
+        batch.l = v1.getMaxReconsumeTimes();
+        return batch;
     }
 
     @Override
@@ -189,13 +183,5 @@ public class SendMessageRequestHeaderV2 implements CommandCustomHeader {
 
     public void setL(final Integer l) {
         this.l = l;
-    }
-
-    public boolean isM() {
-        return m;
-    }
-
-    public void setM(boolean m) {
-        this.m = m;
     }
 }

@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.message.MessageExtBatch;
 import org.apache.rocketmq.store.config.FlushDiskType;
 import org.apache.rocketmq.store.util.LibC;
 import org.slf4j.Logger;
@@ -197,6 +198,26 @@ public class MappedFile extends ReferenceResource {
             byteBuffer.position(currentPos);
             AppendMessageResult result =
                 cb.doAppend(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos, msg);
+            this.wrotePosition.addAndGet(result.getWroteBytes());
+            this.storeTimestamp = result.getStoreTimestamp();
+            return result;
+        }
+
+        log.error("MappedFile.appendMessage return null, wrotePosition: " + currentPos + " fileSize: "
+            + this.fileSize);
+        return new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR);
+    }
+    public AppendMessageResult appendMessages(final MessageExtBatch messageExtBatch, final AppendMessageCallback cb) {
+        assert messageExtBatch != null;
+        assert cb != null;
+
+        int currentPos = this.wrotePosition.get();
+
+        if (currentPos < this.fileSize) {
+            ByteBuffer byteBuffer = writeBuffer != null ? writeBuffer.slice() : this.mappedByteBuffer.slice();
+            byteBuffer.position(currentPos);
+            AppendMessageResult result =
+                ((CommitLog.DefaultAppendMessageCallback) cb).doAppend2(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos, messageExtBatch);
             this.wrotePosition.addAndGet(result.getWroteBytes());
             this.storeTimestamp = result.getStoreTimestamp();
             return result;

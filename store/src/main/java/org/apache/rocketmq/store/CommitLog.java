@@ -18,9 +18,12 @@ package org.apache.rocketmq.store;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,6 +35,7 @@ import org.apache.rocketmq.common.message.MessageAccessor;
 import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
+import org.apache.rocketmq.common.message.MessageExtBatch;
 import org.apache.rocketmq.common.sysflag.MessageSysFlag;
 import org.apache.rocketmq.store.config.BrokerRole;
 import org.apache.rocketmq.store.config.FlushDiskType;
@@ -39,6 +43,7 @@ import org.apache.rocketmq.store.ha.HAService;
 import org.apache.rocketmq.store.schedule.ScheduleMessageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 
 /**
  * Store all metadata downtime for recovery, data protection reliability
@@ -57,6 +62,7 @@ public class CommitLog {
     private final FlushCommitLogService commitLogService;
 
     private final AppendMessageCallback appendMessageCallback;
+    private final BlockingQueue<MessageExtBatchEncoder>  batchEncoders;
     private HashMap<String/* topic-queueid */, Long/* offset */> topicQueueTable = new HashMap<String, Long>(1024);
     private volatile long confirmOffset = -1L;
 
@@ -81,6 +87,11 @@ public class CommitLog {
         this.commitLogService = new CommitRealTimeService();
 
         this.appendMessageCallback = new DefaultAppendMessageCallback(defaultMessageStore.getMessageStoreConfig().getMaxMessageSize());
+        //TODO refactor
+        batchEncoders = new ArrayBlockingQueue<MessageExtBatchEncoder>(30);
+        for (int i = 0; i < 30; i++) {
+            batchEncoders.add(new MessageExtBatchEncoder(4 * 1024 * 1024));
+        }
     }
 
     public boolean load() {
@@ -693,6 +704,196 @@ public class CommitLog {
         return putMessageResult;
     }
 
+    public PutMessageResult putMessages(final MessageExtBatch messageExtBatch) {
+        messageExtBatch.setStoreTimestamp(System.currentTimeMillis());
+        AppendMessageResult result = null;
+
+        StoreStatsService storeStatsService = this.defaultMessageStore.getStoreStatsService();
+
+        /*
+        String topic = msg.getTopic();
+        int queueId = msg.getQueueId();
+
+        final int tranType = MessageSysFlag.getTransactionValue(msg.getSysFlag());
+        if (tranType == MessageSysFlag.TRANSACTION_NOT_TYPE//
+            || tranType == MessageSysFlag.TRANSACTION_COMMIT_TYPE) {
+            // Delay Delivery
+            if (msg.getDelayTimeLevel() > 0) {
+                if (msg.getDelayTimeLevel() > this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel()) {
+                    msg.setDelayTimeLevel(this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel());
+                }
+
+                topic = ScheduleMessageService.SCHEDULE_TOPIC;
+                queueId = ScheduleMessageService.delayLevel2QueueId(msg.getDelayTimeLevel());
+
+                // Backup real topic, queueId
+                MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
+                MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
+                msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
+
+                msg.setTopic(topic);
+                msg.setQueueId(queueId);
+            }
+        }
+        */
+
+        long eclipseTimeInLock = 0;
+        MappedFile unlockMappedFile = null;
+        MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
+
+        //fine-grained lock instead of the coarse-grained
+        MessageExtBatchEncoder batchEncoder = null;
+        try {
+            //be careful, it may block the thread pool
+            batchEncoder = batchEncoders.poll(3, TimeUnit.SECONDS);
+            if (batchEncoder == null) {
+                log.warn("Poll batch encoder failed after {} seconds", 3);
+                return new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, null);
+            }
+            messageExtBatch.setEncodedBuff(batchEncoder.encode(messageExtBatch));
+
+            lockForPutMessage(); //spin...
+            try {
+                long beginLockTimestamp = this.defaultMessageStore.getSystemClock().now();
+                this.beginTimeInLock = beginLockTimestamp;
+
+                // Here settings are stored timestamp, in order to ensure an orderly
+                // global
+                messageExtBatch.setStoreTimestamp(beginLockTimestamp);
+
+                if (null == mappedFile || mappedFile.isFull()) {
+                    mappedFile = this.mappedFileQueue.getLastMappedFile(0); // Mark: NewFile may be cause noise
+                }
+                if (null == mappedFile) {
+                    log.error("Create maped file1 error, topic: " + messageExtBatch.getTopic() + " clientAddr: " + messageExtBatch.getBornHostString());
+                    beginTimeInLock = 0;
+                    return new PutMessageResult(PutMessageStatus.CREATE_MAPEDFILE_FAILED, null);
+                }
+
+                result = mappedFile.appendMessages(messageExtBatch, this.appendMessageCallback);
+                switch (result.getStatus()) {
+                    case PUT_OK:
+                        break;
+                    case END_OF_FILE:
+                        unlockMappedFile = mappedFile;
+                        // Create a new file, re-write the message
+                        mappedFile = this.mappedFileQueue.getLastMappedFile(0);
+                        if (null == mappedFile) {
+                            // XXX: warn and notify me
+                            log.error("Create maped file2 error, topic: " + messageExtBatch.getTopic() + " clientAddr: " + messageExtBatch.getBornHostString());
+                            beginTimeInLock = 0;
+                            return new PutMessageResult(PutMessageStatus.CREATE_MAPEDFILE_FAILED, result);
+                        }
+                        result = mappedFile.appendMessages(messageExtBatch, this.appendMessageCallback);
+                        break;
+                    case MESSAGE_SIZE_EXCEEDED:
+                    case PROPERTIES_SIZE_EXCEEDED:
+                        beginTimeInLock = 0;
+                        return new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, result);
+                    case UNKNOWN_ERROR:
+                        beginTimeInLock = 0;
+                        return new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, result);
+                    default:
+                        beginTimeInLock = 0;
+                        return new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, result);
+                }
+
+                eclipseTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginLockTimestamp;
+                beginTimeInLock = 0;
+            } finally {
+                releasePutMessageLock();
+            }
+
+        } catch (InterruptedException e) {
+            log.error("Take MessageExtBatchEncoder failed", e);
+            return new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, null);
+        } finally {
+            try {
+                if (batchEncoder != null) batchEncoders.put(batchEncoder);
+            }catch (InterruptedException e) {
+                log.error("Put MessageExtBatchEncoder failed", e);
+            }
+        }
+
+
+
+
+
+        if (eclipseTimeInLock > 500) {
+            log.warn("[NOTIFYME]putMessages in lock cost time(ms)={}, bodyLength={} AppendMessageResult={}", eclipseTimeInLock, messageExtBatch.getBody().length, result);
+        }
+
+        if (null != unlockMappedFile && this.defaultMessageStore.getMessageStoreConfig().isWarmMapedFileEnable()) {
+            this.defaultMessageStore.unlockMappedFile(unlockMappedFile);
+        }
+
+        PutMessageResult putMessageResult = new PutMessageResult(PutMessageStatus.PUT_OK, result);
+
+        // Statistics
+        storeStatsService.getSinglePutMessageTopicTimesTotal(messageExtBatch.getTopic()).addAndGet(result.getMsgNum());
+        storeStatsService.getSinglePutMessageTopicSizeTotal(messageExtBatch.getTopic()).addAndGet(result.getWroteBytes());
+
+        GroupCommitRequest request = null;
+
+        // Synchronization flush
+        if (FlushDiskType.SYNC_FLUSH == this.defaultMessageStore.getMessageStoreConfig().getFlushDiskType()) {
+            final GroupCommitService service = (GroupCommitService) this.flushCommitLogService;
+            if (messageExtBatch.isWaitStoreMsgOK()) {
+                request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
+                service.putRequest(request);
+                boolean flushOK = request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
+                if (!flushOK) {
+                    log.error("do groupcommit, wait for flush failed, topic: " + messageExtBatch.getTopic() + " tags: " + messageExtBatch.getTags()
+                        + " client address: " + messageExtBatch.getBornHostString());
+                    putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_DISK_TIMEOUT);
+                }
+            } else {
+                service.wakeup();
+            }
+        }
+        // Asynchronous flush
+        else {
+            if (!this.defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
+                flushCommitLogService.wakeup();
+            } else {
+                commitLogService.wakeup();
+            }
+        }
+
+        // Synchronous write double
+        if (BrokerRole.SYNC_MASTER == this.defaultMessageStore.getMessageStoreConfig().getBrokerRole()) {
+            HAService service = this.defaultMessageStore.getHaService();
+            if (messageExtBatch.isWaitStoreMsgOK()) {
+                // Determine whether to wait
+                if (service.isSlaveOK(result.getWroteOffset() + result.getWroteBytes())) {
+                    if (null == request) {
+                        request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
+                    }
+                    service.putRequest(request);
+
+                    service.getWaitNotifyObject().wakeupAll();
+
+                    boolean flushOK =
+                        // TODO
+                        request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
+                    if (!flushOK) {
+                        log.error("do sync transfer other node, wait return, but failed, topic: " + messageExtBatch.getTopic() + " tags: "
+                            + messageExtBatch.getTags() + " client address: " + messageExtBatch.getBornHostString());
+                        putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_SLAVE_TIMEOUT);
+                    }
+                }
+                // Slave problem
+                else {
+                    // Tell the producer, slave not available
+                    putMessageResult.setPutMessageStatus(PutMessageStatus.SLAVE_NOT_AVAILABLE);
+                }
+            }
+        }
+
+        return putMessageResult;
+    }
+
+
     /**
      * According to receive certain message or offset storage time if an error
      * occurs, it returns -1
@@ -1216,7 +1417,7 @@ public class CommitLog {
             // 12 STOREHOSTADDRESS
             this.resetByteBuffer(hostHolder, 8);
             this.msgStoreItemMemory.put(msgInner.getStoreHostBytes(hostHolder));
-            //this.msgStoreItemMemory.put(msgInner.getStoreHostBytes());
+            //this.msgBatchMemory.put(msgInner.getStoreHostBytes());
             // 13 RECONSUMETIMES
             this.msgStoreItemMemory.putInt(msgInner.getReconsumeTimes());
             // 14 Prepared Transaction Offset
@@ -1255,9 +1456,474 @@ public class CommitLog {
             return result;
         }
 
+        public AppendMessageResult doAppend(final long fileFromOffset, final ByteBuffer byteBuffer, final int maxBlank, final Collection<MessageExtBrokerInner> msgInners) {
+            assert msgInners.size() > 0;
+
+            byteBuffer.mark();
+            //physical offset
+            long wroteOffset = fileFromOffset + byteBuffer.position();
+            MessageExtBrokerInner firstMsgInner = msgInners.iterator().next();
+            // Record ConsumeQueue information
+            keyBuilder.setLength(0);
+            keyBuilder.append(firstMsgInner.getTopic());
+            keyBuilder.append('-');
+            keyBuilder.append(firstMsgInner.getQueueId());
+            String key = keyBuilder.toString();
+            Long queueOffset = CommitLog.this.topicQueueTable.get(key);
+            if (null == queueOffset) {
+                queueOffset = 0L;
+                CommitLog.this.topicQueueTable.put(key, queueOffset);
+            }
+            long beginQueueOffset = queueOffset.longValue();
+            int totalMsgLen = 0;
+            String msgIds = "";
+            final long beginTimeMills = CommitLog.this.defaultMessageStore.now();
+            for (MessageExtBrokerInner msgInner : msgInners) {
+                this.resetByteBuffer(hostHolder, 8);
+                String msgId = MessageDecoder.createMessageId(this.msgIdMemory, msgInner.getStoreHostBytes(hostHolder), wroteOffset + totalMsgLen);
+                if (msgIds.length() == 0) {
+                    msgIds = msgId;
+                } else {
+                    msgIds = msgIds + "," + msgId;
+                }
+
+                final byte[] propertiesData =
+                        msgInner.getPropertiesString() == null ? null : msgInner.getPropertiesString().getBytes(MessageDecoder.CHARSET_UTF8);
+                final short propertiesLength = propertiesData == null ? 0 : (short) propertiesData.length;
+
+                if (propertiesLength > Short.MAX_VALUE) {
+                    log.warn("putMessage message properties length too long. length={}", propertiesData.length);
+                    return new AppendMessageResult(AppendMessageStatus.PROPERTIES_SIZE_EXCEEDED);
+                }
+
+                final byte[] topicData = msgInner.getTopic().getBytes(MessageDecoder.CHARSET_UTF8);
+                final int topicLength = topicData == null ? 0 : topicData.length;
+
+                final int bodyLength = msgInner.getBody() == null ? 0 : msgInner.getBody().length;
+
+                final int msgLen = calMsgLength(bodyLength, topicLength, propertiesLength);
+
+                // Exceeds the maximum message
+                if (msgLen > this.maxMessageSize) {
+                    CommitLog.log.warn("message size exceeded, msg total size: " + msgLen + ", msg body size: " + bodyLength
+                            + ", maxMessageSize: " + this.maxMessageSize);
+                    return new AppendMessageResult(AppendMessageStatus.MESSAGE_SIZE_EXCEEDED);
+                }
+
+                totalMsgLen += msgLen;
+                // Determines whether there is sufficient free space
+                if ((totalMsgLen + END_FILE_MIN_BLANK_LENGTH) > maxBlank) {
+                    this.resetByteBuffer(this.msgStoreItemMemory, 8);
+                    // 1 TOTALSIZE
+                    this.msgStoreItemMemory.putInt(maxBlank);
+                    // 2 MAGICCODE
+                    this.msgStoreItemMemory.putInt(CommitLog.BLANK_MAGIC_CODE);
+                    // 3 The remaining space may be any value
+                    //
+
+                    // Here the length of the specially set maxBlank
+                    byteBuffer.reset(); //ignore the previous appended messages
+                    byteBuffer.put(this.msgStoreItemMemory.array(), 0, 8);
+                    return new AppendMessageResult(AppendMessageStatus.END_OF_FILE, wroteOffset, maxBlank, msgIds, msgInner.getStoreTimestamp(),
+                            beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
+                }
+
+                // Initialization of storage space
+                this.resetByteBuffer(msgStoreItemMemory, msgLen);
+                // 1 TOTALSIZE
+                this.msgStoreItemMemory.putInt(msgLen);
+                // 2 MAGICCODE
+                this.msgStoreItemMemory.putInt(CommitLog.MESSAGE_MAGIC_CODE);
+                // 3 BODYCRC
+                this.msgStoreItemMemory.putInt(msgInner.getBodyCRC());
+                // 4 QUEUEID
+                this.msgStoreItemMemory.putInt(msgInner.getQueueId());
+                // 5 FLAG
+                this.msgStoreItemMemory.putInt(msgInner.getFlag());
+                // 6 QUEUEOFFSET
+                this.msgStoreItemMemory.putLong(queueOffset++);
+                // 7 PHYSICALOFFSET
+                this.msgStoreItemMemory.putLong(fileFromOffset + byteBuffer.position());
+                // 8 SYSFLAG
+                this.msgStoreItemMemory.putInt(msgInner.getSysFlag());
+                // 9 BORNTIMESTAMP
+                this.msgStoreItemMemory.putLong(msgInner.getBornTimestamp());
+                // 10 BORNHOST
+                this.resetByteBuffer(hostHolder, 8);
+                this.msgStoreItemMemory.put(msgInner.getBornHostBytes(hostHolder));
+                // 11 STORETIMESTAMP
+                this.msgStoreItemMemory.putLong(msgInner.getStoreTimestamp());
+                // 12 STOREHOSTADDRESS
+                this.resetByteBuffer(hostHolder, 8);
+                this.msgStoreItemMemory.put(msgInner.getStoreHostBytes(hostHolder));
+                //this.msgBatchMemory.put(msgInner.getStoreHostBytes());
+                // 13 RECONSUMETIMES
+                this.msgStoreItemMemory.putInt(msgInner.getReconsumeTimes());
+                // 14 Prepared Transaction Offset
+                this.msgStoreItemMemory.putLong(msgInner.getPreparedTransactionOffset());
+                // 15 BODY
+                this.msgStoreItemMemory.putInt(bodyLength);
+                if (bodyLength > 0)
+                    this.msgStoreItemMemory.put(msgInner.getBody());
+                // 16 TOPIC
+                this.msgStoreItemMemory.put((byte) topicLength);
+                this.msgStoreItemMemory.put(topicData);
+                // 17 PROPERTIES
+                this.msgStoreItemMemory.putShort(propertiesLength);
+                if (propertiesLength > 0)
+                    this.msgStoreItemMemory.put(propertiesData);
+
+                // Write messages to the queue buffer
+                byteBuffer.put(this.msgStoreItemMemory.array(), 0, msgLen);
+            }
+            AppendMessageResult result = new AppendMessageResult(AppendMessageStatus.PUT_OK, wroteOffset, totalMsgLen, msgIds,
+                    firstMsgInner.getStoreTimestamp(), beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
+
+            final int tranType = MessageSysFlag.getTransactionValue(firstMsgInner.getSysFlag());
+            switch (tranType) {
+                case MessageSysFlag.TRANSACTION_PREPARED_TYPE:
+                case MessageSysFlag.TRANSACTION_ROLLBACK_TYPE:
+                case MessageSysFlag.TRANSACTION_COMMIT_TYPE:
+                    //should check before
+                    throw new RuntimeException("Batched Messages dose not support transaction now");
+                case MessageSysFlag.TRANSACTION_NOT_TYPE:
+                    // The next update ConsumeQueue information
+                    CommitLog.this.topicQueueTable.put(key, queueOffset);
+                    break;
+                default:
+                    break;
+            }
+
+            return result;
+        }
+
+        public AppendMessageResult doAppend(final long fileFromOffset, final ByteBuffer byteBuffer, final int maxBlank, final MessageExtBatch messageExtBatch) {
+            byteBuffer.mark();
+            //physical offset
+            long wroteOffset = fileFromOffset + byteBuffer.position();
+            // Record ConsumeQueue information
+            keyBuilder.setLength(0);
+            keyBuilder.append(messageExtBatch.getTopic());
+            keyBuilder.append('-');
+            keyBuilder.append(messageExtBatch.getQueueId());
+            String key = keyBuilder.toString();
+            Long queueOffset = CommitLog.this.topicQueueTable.get(key);
+            if (null == queueOffset) {
+                queueOffset = 0L;
+                CommitLog.this.topicQueueTable.put(key, queueOffset);
+            }
+            long beginQueueOffset = queueOffset;
+            int totalMsgLen = 0;
+            int msgNum = 0;
+            String msgIds = "";
+            final long beginTimeMills = CommitLog.this.defaultMessageStore.now();
+            ByteBuffer  messagesByteBuff = messageExtBatch.wrap();
+            while (messagesByteBuff.hasRemaining()) {
+                // 1 TOTALSIZE
+                messagesByteBuff.getInt();
+                // 2 MAGICCODE
+                messagesByteBuff.getInt();
+                // 3 BODYCRC
+                messagesByteBuff.getInt();
+                // 4 FLAG
+                int flag = messagesByteBuff.getInt();
+                // 5 BODY
+                int bodyLen = messagesByteBuff.getInt();
+                int bodyPos = messagesByteBuff.position();
+                int bodyCrc = UtilAll.crc32(messagesByteBuff.array(), bodyPos, bodyLen);
+                messagesByteBuff.position(bodyPos + bodyLen);
+                // 6 properties
+                short propertiesLen = messagesByteBuff.getShort();
+                int propertiesPos = messagesByteBuff.position();
+                messagesByteBuff.position(propertiesPos + propertiesLen);
+
+                this.resetByteBuffer(hostHolder, 8);
+                String msgId = MessageDecoder.createMessageId(this.msgIdMemory, messageExtBatch.getStoreHostBytes(), wroteOffset + totalMsgLen);
+                if (msgIds.length() == 0) {
+                    msgIds = msgId;
+                } else {
+                    msgIds = msgIds + "," + msgId;
+                }
+                final byte[] topicData = messageExtBatch.getTopic().getBytes(MessageDecoder.CHARSET_UTF8);
+
+                final int topicLength = topicData.length;
+
+                final int msgLen = calMsgLength(bodyLen, topicLength, propertiesLen);
+
+                // Exceeds the maximum message
+                if (msgLen > this.maxMessageSize) {
+                    CommitLog.log.warn("message size exceeded, msg total size: " + msgLen + ", msg body size: " + bodyLen
+                            + ", maxMessageSize: " + this.maxMessageSize);
+                    return new AppendMessageResult(AppendMessageStatus.MESSAGE_SIZE_EXCEEDED);
+                }
+
+                totalMsgLen += msgLen;
+                // Determines whether there is sufficient free space
+                if ((totalMsgLen + END_FILE_MIN_BLANK_LENGTH) > maxBlank) {
+                    this.resetByteBuffer(this.msgStoreItemMemory, 8);
+                    // 1 TOTALSIZE
+                    this.msgStoreItemMemory.putInt(maxBlank);
+                    // 2 MAGICCODE
+                    this.msgStoreItemMemory.putInt(CommitLog.BLANK_MAGIC_CODE);
+                    // 3 The remaining space may be any value
+                    //
+
+                    // Here the length of the specially set maxBlank
+                    byteBuffer.reset(); //ignore the previous appended messages
+                    byteBuffer.put(this.msgStoreItemMemory.array(), 0, 8);
+                    return new AppendMessageResult(AppendMessageStatus.END_OF_FILE, wroteOffset, maxBlank, msgIds, messageExtBatch.getStoreTimestamp(),
+                            beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
+                }
+
+                // Initialization of storage space
+                this.resetByteBuffer(msgStoreItemMemory, msgLen);
+                // 1 TOTALSIZE
+                this.msgStoreItemMemory.putInt(msgLen);
+                // 2 MAGICCODE
+                this.msgStoreItemMemory.putInt(CommitLog.MESSAGE_MAGIC_CODE);
+                // 3 BODYCRC
+                this.msgStoreItemMemory.putInt(bodyCrc);
+                // 4 QUEUEID
+                this.msgStoreItemMemory.putInt(messageExtBatch.getQueueId());
+                // 5 FLAG
+                this.msgStoreItemMemory.putInt(flag);
+                // 6 QUEUEOFFSET
+                this.msgStoreItemMemory.putLong(queueOffset++);
+                // 7 PHYSICALOFFSET
+                this.msgStoreItemMemory.putLong(fileFromOffset + byteBuffer.position());
+                // 8 SYSFLAG
+                this.msgStoreItemMemory.putInt(messageExtBatch.getSysFlag());
+                // 9 BORNTIMESTAMP
+                this.msgStoreItemMemory.putLong(messageExtBatch.getBornTimestamp());
+                // 10 BORNHOST
+                this.resetByteBuffer(hostHolder, 8);
+                this.msgStoreItemMemory.put(messageExtBatch.getBornHostBytes());
+                // 11 STORETIMESTAMP
+                this.msgStoreItemMemory.putLong(messageExtBatch.getStoreTimestamp());
+                // 12 STOREHOSTADDRESS
+                this.resetByteBuffer(hostHolder, 8);
+                this.msgStoreItemMemory.put(messageExtBatch.getStoreHostBytes());
+                // 13 RECONSUMETIMES
+                this.msgStoreItemMemory.putInt(messageExtBatch.getReconsumeTimes());
+                // 14 Prepared Transaction Offset, batch does not support transaction
+                this.msgStoreItemMemory.putLong(0);
+                // 15 BODY
+                this.msgStoreItemMemory.putInt(bodyLen);
+                if (bodyLen > 0)
+                    this.msgStoreItemMemory.put(messagesByteBuff.array(), bodyPos, bodyLen);
+                // 16 TOPIC
+                this.msgStoreItemMemory.put((byte) topicLength);
+                this.msgStoreItemMemory.put(topicData);
+                // 17 PROPERTIES
+                this.msgStoreItemMemory.putShort(propertiesLen);
+                if (propertiesLen > 0)
+                    this.msgStoreItemMemory.put(messagesByteBuff.array(), propertiesPos, propertiesLen);
+
+                // Write messages to the queue buffer
+                byteBuffer.put(this.msgStoreItemMemory.array(), 0, msgLen);
+
+                msgNum++;
+            }
+            AppendMessageResult result = new AppendMessageResult(AppendMessageStatus.PUT_OK, wroteOffset, totalMsgLen, msgIds,
+                    messageExtBatch.getStoreTimestamp(), beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
+
+            result.setMsgNum(msgNum);
+
+            CommitLog.this.topicQueueTable.put(key, queueOffset);
+
+            return result;
+        }
+
+    public AppendMessageResult doAppend2(final long fileFromOffset, final ByteBuffer byteBuffer, final int maxBlank, final MessageExtBatch messageExtBatch) {
+            byteBuffer.mark();
+            //physical offset
+            long wroteOffset = fileFromOffset + byteBuffer.position();
+            // Record ConsumeQueue information
+            keyBuilder.setLength(0);
+            keyBuilder.append(messageExtBatch.getTopic());
+            keyBuilder.append('-');
+            keyBuilder.append(messageExtBatch.getQueueId());
+            String key = keyBuilder.toString();
+            Long queueOffset = CommitLog.this.topicQueueTable.get(key);
+            if (null == queueOffset) {
+                queueOffset = 0L;
+                CommitLog.this.topicQueueTable.put(key, queueOffset);
+            }
+            long beginQueueOffset = queueOffset;
+            int totalMsgLen = 0;
+            int msgNum = 0;
+            String msgIds = "";
+            final long beginTimeMills = CommitLog.this.defaultMessageStore.now();
+            ByteBuffer  messagesByteBuff = messageExtBatch.getEncodedBuff();
+            while (messagesByteBuff.hasRemaining()) {
+                // 1 TOTALSIZE
+                final int msgPos = messagesByteBuff.position();
+                final int msgLen = messagesByteBuff.getInt();
+                final int bodyLen = 0; //TODO
+                totalMsgLen += msgLen;
+
+                // Exceeds the maximum message
+                if (msgLen > this.maxMessageSize) {
+                    CommitLog.log.warn("message size exceeded, msg total size: " + msgLen + ", msg body size: " + bodyLen
+                            + ", maxMessageSize: " + this.maxMessageSize);
+                    return new AppendMessageResult(AppendMessageStatus.MESSAGE_SIZE_EXCEEDED);
+                }
+                totalMsgLen += msgLen;
+                // Determines whether there is sufficient free space
+                if ((totalMsgLen + END_FILE_MIN_BLANK_LENGTH) > maxBlank) {
+                    this.resetByteBuffer(this.msgStoreItemMemory, 8);
+                    // 1 TOTALSIZE
+                    this.msgStoreItemMemory.putInt(maxBlank);
+                    // 2 MAGICCODE
+                    this.msgStoreItemMemory.putInt(CommitLog.BLANK_MAGIC_CODE);
+                    // 3 The remaining space may be any value
+                    //
+
+                    // Here the length of the specially set maxBlank
+                    byteBuffer.reset(); //ignore the previous appended messages
+                    byteBuffer.put(this.msgStoreItemMemory.array(), 0, 8);
+                    return new AppendMessageResult(AppendMessageStatus.END_OF_FILE, wroteOffset, maxBlank, msgIds, messageExtBatch.getStoreTimestamp(),
+                            beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
+                }
+                msgIds = msgIds + ((msgIds.length() == 0) ? "123" : ",123");
+                queueOffset++;
+                msgNum++;
+                messagesByteBuff.position(msgPos + msgLen);
+            }
+
+            byteBuffer.put(messagesByteBuff.array(), 0, totalMsgLen);
+            messageExtBatch.setEncodedBuff(null);
+            AppendMessageResult result = new AppendMessageResult(AppendMessageStatus.PUT_OK, wroteOffset, totalMsgLen, msgIds,
+                    messageExtBatch.getStoreTimestamp(), beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
+
+            result.setMsgNum(msgNum);
+
+            CommitLog.this.topicQueueTable.put(key, queueOffset);
+
+            return result;
+        }
+
         private void resetByteBuffer(final ByteBuffer byteBuffer, final int limit) {
             byteBuffer.flip();
             byteBuffer.limit(limit);
         }
+
+
+
+    }
+
+    public class MessageExtBatchEncoder {
+        private final ByteBuffer msgIdMemory;
+        // Store the message content
+        private final ByteBuffer msgBatchMemory;
+        // The maximum length of the message
+        private final int maxMessageSize;
+
+        private final ByteBuffer hostHolder = ByteBuffer.allocate(8);
+
+        MessageExtBatchEncoder(final int size) {
+            this.msgIdMemory = ByteBuffer.allocate(MessageDecoder.MSG_ID_LENGTH);
+            this.msgBatchMemory = ByteBuffer.allocate(size);
+            this.maxMessageSize = size;
+        }
+
+        public ByteBuffer getMsgStoreItemMemory() {
+            return msgBatchMemory;
+        }
+
+        public ByteBuffer encode(final MessageExtBatch messageExtBatch) {
+            msgBatchMemory.clear(); //not thread-safe
+            int totalMsgLen = 0;
+            ByteBuffer  messagesByteBuff = messageExtBatch.wrap();
+            while (messagesByteBuff.hasRemaining()) {
+                // 1 TOTALSIZE
+                messagesByteBuff.getInt();
+                // 2 MAGICCODE
+                messagesByteBuff.getInt();
+                // 3 BODYCRC
+                messagesByteBuff.getInt();
+                // 4 FLAG
+                int flag = messagesByteBuff.getInt();
+                // 5 BODY
+                int bodyLen = messagesByteBuff.getInt();
+                int bodyPos = messagesByteBuff.position();
+                int bodyCrc = UtilAll.crc32(messagesByteBuff.array(), bodyPos, bodyLen);
+                messagesByteBuff.position(bodyPos + bodyLen);
+                // 6 properties
+                short propertiesLen = messagesByteBuff.getShort();
+                int propertiesPos = messagesByteBuff.position();
+                messagesByteBuff.position(propertiesPos + propertiesLen);
+
+                final byte[] topicData = messageExtBatch.getTopic().getBytes(MessageDecoder.CHARSET_UTF8);
+
+                final int topicLength = topicData.length;
+
+                final int msgLen = calMsgLength(bodyLen, topicLength, propertiesLen);
+
+                // Exceeds the maximum message
+                if (msgLen > this.maxMessageSize) {
+                    CommitLog.log.warn("message size exceeded, msg total size: " + msgLen + ", msg body size: " + bodyLen
+                        + ", maxMessageSize: " + this.maxMessageSize);
+                    throw new RuntimeException("message size exceeded");
+                }
+
+                totalMsgLen += msgLen;
+                // Determines whether there is sufficient free space
+                if (totalMsgLen > maxMessageSize) {
+                    throw new RuntimeException("message size exceeded");
+                }
+
+                // 1 TOTALSIZE
+                this.msgBatchMemory.putInt(msgLen);
+                // 2 MAGICCODE
+                this.msgBatchMemory.putInt(CommitLog.MESSAGE_MAGIC_CODE);
+                // 3 BODYCRC
+                this.msgBatchMemory.putInt(bodyCrc);
+                // 4 QUEUEID
+                this.msgBatchMemory.putInt(messageExtBatch.getQueueId());
+                // 5 FLAG
+                this.msgBatchMemory.putInt(flag);
+                // 6 QUEUEOFFSET
+                this.msgBatchMemory.putLong(0);
+                // 7 PHYSICALOFFSET
+                this.msgBatchMemory.putLong(0);
+                // 8 SYSFLAG
+                this.msgBatchMemory.putInt(messageExtBatch.getSysFlag());
+                // 9 BORNTIMESTAMP
+                this.msgBatchMemory.putLong(messageExtBatch.getBornTimestamp());
+                // 10 BORNHOST
+                this.resetByteBuffer(hostHolder, 8);
+                this.msgBatchMemory.put(messageExtBatch.getBornHostBytes());
+                // 11 STORETIMESTAMP
+                this.msgBatchMemory.putLong(messageExtBatch.getStoreTimestamp());
+                // 12 STOREHOSTADDRESS
+                this.resetByteBuffer(hostHolder, 8);
+                this.msgBatchMemory.put(messageExtBatch.getStoreHostBytes());
+                // 13 RECONSUMETIMES
+                this.msgBatchMemory.putInt(messageExtBatch.getReconsumeTimes());
+                // 14 Prepared Transaction Offset, batch does not support transaction
+                this.msgBatchMemory.putLong(0);
+                // 15 BODY
+                this.msgBatchMemory.putInt(bodyLen);
+                if (bodyLen > 0)
+                    this.msgBatchMemory.put(messagesByteBuff.array(), bodyPos, bodyLen);
+                // 16 TOPIC
+                this.msgBatchMemory.put((byte) topicLength);
+                this.msgBatchMemory.put(topicData);
+                // 17 PROPERTIES
+                this.msgBatchMemory.putShort(propertiesLen);
+                if (propertiesLen > 0)
+                    this.msgBatchMemory.put(messagesByteBuff.array(), propertiesPos, propertiesLen);
+            }
+            msgBatchMemory.flip();
+            return msgBatchMemory;
+        }
+
+
+        private void resetByteBuffer(final ByteBuffer byteBuffer, final int limit) {
+            byteBuffer.flip();
+            byteBuffer.limit(limit);
+        }
+
     }
 }
