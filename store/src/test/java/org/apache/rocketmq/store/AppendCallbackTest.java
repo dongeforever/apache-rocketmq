@@ -19,6 +19,7 @@ package org.apache.rocketmq.store;
 
 
 import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageBatch;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageExtBatch;
@@ -44,6 +45,8 @@ public class AppendCallbackTest {
 
     AppendMessageCallback callback;
 
+    CommitLog.MessageExtBatchEncoder batchEncoder = new CommitLog.MessageExtBatchEncoder(10 * 1024 * 1024);
+
     @Before
     public void init() throws Exception{
         MessageStoreConfig messageStoreConfig = new MessageStoreConfig();
@@ -59,54 +62,6 @@ public class AppendCallbackTest {
         callback = commitLog.new DefaultAppendMessageCallback(1024);
     }
 
-
-    @Test
-    public void testAppendBatchedMessages() {
-        List<MessageExtBrokerInner> brokerInners = new ArrayList<>();
-        String topic = "test-topic";
-        int queue= 0;
-        for (int i = 0; i < 10; i++) {
-            MessageExtBrokerInner inner = new MessageExtBrokerInner();
-            inner.setBody("body".getBytes());
-            inner.setTopic(topic);
-            inner.setQueueId(queue);
-            inner.setBornTimestamp(System.currentTimeMillis());
-            inner.setBornHost(new InetSocketAddress("127.0.0.1",123));
-            inner.setStoreHost(new InetSocketAddress("127.0.0.1",124));
-            brokerInners.add(inner);
-        }
-        ByteBuffer buff = ByteBuffer.allocate(1024 * 10);
-        //encounter end of file when append half of the data
-        AppendMessageResult result = callback.doAppend(0, buff, 1000, brokerInners);
-        assertEquals(result.getStatus(), AppendMessageStatus.END_OF_FILE);
-        assertTrue(result.getMsgId().length() > 0); //should have already constructed some message ids
-        assertEquals(result.getLogicsOffset(), 0);
-        assertEquals(result.getWroteOffset(), 0);
-        assertEquals(result.getWroteBytes(), 1000);
-        assertEquals(buff.position(), 8); //write blank size and magic value
-
-        buff.clear();
-        //append all
-        AppendMessageResult allresult = callback.doAppend(0, buff, 1024 * 10, brokerInners);
-        assertEquals(allresult.getStatus(), AppendMessageStatus.PUT_OK);
-        assertEquals(allresult.getWroteOffset(), 0);
-        assertEquals(allresult.getLogicsOffset(), 0);
-        assertEquals(allresult.getWroteBytes(), buff.position());
-
-        Set<String> msgIds = new HashSet<>();
-        for (String msgId: allresult.getMsgId().split(",")) {
-            msgIds.add(msgId);
-        }
-        assertEquals(msgIds.size(), brokerInners.size());
-        buff.flip();
-        List<MessageExt> messages = MessageDecoder.decodes(buff);
-        assertEquals(messages.size(), brokerInners.size());
-        for (int i = 0; i < messages.size(); i++) {
-            assertEquals(messages.get(i).getTopic(), brokerInners.get(i).getTopic());
-            assertEquals(new String(messages.get(i).getBody()), new String(brokerInners.get(i).getBody()));
-        }
-
-    }
 
     @Test
     public void testAppendMessageBatchEndOfFile() throws Exception{
@@ -128,6 +83,7 @@ public class AppendCallbackTest {
         messageExtBatch.setStoreHost(new InetSocketAddress("127.0.0.1",124));
         messageExtBatch.setBody(MessageDecoder.encodeMessages(messages));
 
+        messageExtBatch.setEncodedBuff(batchEncoder.encode(messageExtBatch));
         ByteBuffer buff = ByteBuffer.allocate(1024 * 10);
         //encounter end of file when append half of the data
         AppendMessageResult result = callback.doAppend(0, buff, 1000, messageExtBatch);
@@ -159,7 +115,7 @@ public class AppendCallbackTest {
         messageExtBatch.setStoreHost(new InetSocketAddress("127.0.0.1",124));
         messageExtBatch.setBody(MessageDecoder.encodeMessages(messages));
 
-
+        messageExtBatch.setEncodedBuff(batchEncoder.encode(messageExtBatch));
         ByteBuffer buff = ByteBuffer.allocate(1024 * 10);
         AppendMessageResult allresult = callback.doAppend(0, buff, 1024 * 10, messageExtBatch);
 
@@ -172,6 +128,7 @@ public class AppendCallbackTest {
 
         Set<String> msgIds = new HashSet<>();
         for (String msgId: allresult.getMsgId().split(",")) {
+            assertEquals(32, msgId.length());
             msgIds.add(msgId);
         }
         assertEquals(messages.size(), msgIds.size());

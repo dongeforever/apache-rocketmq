@@ -16,6 +16,7 @@
  */
 package org.apache.rocketmq.client.producer;
 
+import java.util.Collection;
 import java.util.List;
 import org.apache.rocketmq.client.ClientConfig;
 import org.apache.rocketmq.client.QueryResult;
@@ -24,6 +25,7 @@ import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.client.impl.producer.DefaultMQProducerImpl;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageBatch;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageId;
@@ -577,6 +579,35 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
         return this.defaultMQProducerImpl.queryMessageByUniqKey(topic, msgId);
     }
 
+    @Override
+    public SendResult send(Collection<Message> msgs) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+        return this.defaultMQProducerImpl.send(batch(msgs));
+    }
+
+    @Override
+    public SendResult send(Collection<Message> msgs, long timeout) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+        return this.defaultMQProducerImpl.send(batch(msgs), timeout);
+    }
+
+    @Override
+    public SendResult send(Collection<Message> msgs, MessageQueue messageQueue) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+        return this.defaultMQProducerImpl.send(batch(msgs), messageQueue);
+    }
+
+    @Override
+    public SendResult send(Collection<Message> msgs, MessageQueue messageQueue, long timeout) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+        return this.defaultMQProducerImpl.send(batch(msgs), messageQueue, timeout);
+    }
+
+    private MessageBatch batch(Collection<Message> msgs) throws MQClientException {
+        MessageBatch batch;
+        try {
+            batch = MessageBatch.generateFromList(msgs);
+        } catch (Exception e) {
+            throw new MQClientException("Batch msgs failed", e);
+        }
+        return batch;
+    }
     public String getProducerGroup() {
         return producerGroup;
     }

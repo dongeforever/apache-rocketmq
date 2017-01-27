@@ -457,11 +457,13 @@ public class MessageDecoder {
             encodedMessages.add(tmp);
             allSize += tmp.length;
         }
-        ByteBuffer buff = ByteBuffer.allocate(allSize);
+        byte[] allBytes = new byte[allSize];
+        int pos = 0;
         for (byte[] bytes : encodedMessages) {
-            buff.put(bytes);
+            System.arraycopy(bytes, 0, allBytes, pos, bytes.length);
+            pos += bytes.length;
         }
-        return buff.array();
+        return allBytes;
     }
 
 

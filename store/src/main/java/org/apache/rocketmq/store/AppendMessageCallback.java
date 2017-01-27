@@ -16,10 +16,8 @@
  */
 package org.apache.rocketmq.store;
 
-import org.apache.rocketmq.common.message.MessageExtBatch;
-
 import java.nio.ByteBuffer;
-import java.util.Collection;
+import org.apache.rocketmq.common.message.MessageExtBatch;
 
 /**
  * Write messages callback interface
@@ -36,18 +34,6 @@ public interface AppendMessageCallback {
      */
     AppendMessageResult doAppend(final long fileFromOffset, final ByteBuffer byteBuffer,
                                  final int maxBlank, final MessageExtBrokerInner msg);
-
-    /**
-     * After batched message serialization, write MapedByteBuffer
-     *
-     * @param byteBuffer
-     * @param maxBlank
-     * @param msgs
-     *
-     * @return How many bytes to write
-     */
-    AppendMessageResult doAppend(final long fileFromOffset, final ByteBuffer byteBuffer,
-                                 final int maxBlank, final Collection<MessageExtBrokerInner> msgs);
 
     /**
      * After batched message serialization, write MapedByteBuffer

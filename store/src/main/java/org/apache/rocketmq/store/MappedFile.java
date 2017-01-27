@@ -217,7 +217,7 @@ public class MappedFile extends ReferenceResource {
             ByteBuffer byteBuffer = writeBuffer != null ? writeBuffer.slice() : this.mappedByteBuffer.slice();
             byteBuffer.position(currentPos);
             AppendMessageResult result =
-                ((CommitLog.DefaultAppendMessageCallback) cb).doAppend2(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos, messageExtBatch);
+                cb.doAppend(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos, messageExtBatch);
             this.wrotePosition.addAndGet(result.getWroteBytes());
             this.storeTimestamp = result.getStoreTimestamp();
             return result;

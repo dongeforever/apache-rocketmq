@@ -17,6 +17,7 @@
 package org.apache.rocketmq.common.message;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 
@@ -25,12 +26,8 @@ public class MessageBatch extends Message implements Iterable<Message> {
     private static final long serialVersionUID = 621335151046335557L;
     private final List<Message> messages;
 
-    public MessageBatch() {
-        this(32);
-    }
-
-    public MessageBatch(int msgNum) {
-        messages = new ArrayList<>(msgNum);
+    private MessageBatch(List<Message> messages) {
+        this.messages = messages;
     }
 
     public byte[] encode() throws Exception {
@@ -41,7 +38,7 @@ public class MessageBatch extends Message implements Iterable<Message> {
     public void addMessage(Message message) {
         assert message != null;
         if (message.getDelayTimeLevel() > 0) {
-            throw new UnsupportedOperationException("You should use setDelayTimeLevel in MessageBatch");
+            throw new UnsupportedOperationException("TimeDelayLevel in not supported for batching");
         }
         messages.add(message);
     }
@@ -49,4 +46,36 @@ public class MessageBatch extends Message implements Iterable<Message> {
     public Iterator<Message> iterator() {
         return messages.iterator();
     }
+
+    public static MessageBatch generateFromList(Collection<Message> messages) throws Exception {
+        assert messages != null;
+        assert messages.size() > 0;
+        List<Message> messageList = new ArrayList<>(messages.size());
+        Message first = null;
+        for (Message message : messages) {
+            if (message.getDelayTimeLevel() > 0) {
+                throw new UnsupportedOperationException("TimeDelayLevel in not supported for batching");
+            }
+            if (first == null) {
+                first = message;
+            } else {
+                if (first.getTopic().equals(message.getTopic())) {
+                    throw new UnsupportedOperationException("The topic of the batched messages should be the same");
+                }
+                if (first.isWaitStoreMsgOK() != message.isWaitStoreMsgOK()) {
+                    throw new UnsupportedOperationException("The waitStoreMsgOK of the batched messages should the same");
+                }
+            }
+            messageList.add(message);
+        }
+        MessageBatch messageBatch = new MessageBatch(messageList);
+        try {
+            messageBatch.setBody(messageBatch.encode());
+        } catch (Exception e) {
+            throw new RuntimeException("Error in encoding message batch", e);
+        }
+        messageBatch.setTopic(first.getTopic());
+        return messageBatch;
+    }
+
 }

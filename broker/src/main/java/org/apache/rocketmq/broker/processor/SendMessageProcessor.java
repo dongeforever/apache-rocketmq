@@ -17,6 +17,8 @@
 package org.apache.rocketmq.broker.processor;
 
 import io.netty.channel.ChannelHandlerContext;
+import java.net.SocketAddress;
+import java.util.List;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.mqtrace.ConsumeMessageContext;
 import org.apache.rocketmq.broker.mqtrace.ConsumeMessageHook;
@@ -44,16 +46,10 @@ import org.apache.rocketmq.common.sysflag.TopicSysFlag;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.netty.NettyRequestProcessor;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
-import org.apache.rocketmq.store.MessageDecoderBrokerInner;
 import org.apache.rocketmq.store.MessageExtBrokerInner;
 import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.config.StorePathConfigHelper;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
-
-import java.net.SocketAddress;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
 
 public class SendMessageProcessor extends AbstractSendMessageProcessor implements NettyRequestProcessor {
 
@@ -80,7 +76,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
                 RemotingCommand response = null;
                 if (requestHeader.isBatch()) {
-                    response = this.sendBatchMessage2(ctx, request, mqtraceContext, requestHeader);
+                    response = this.sendBatchMessage(ctx, request, mqtraceContext, requestHeader);
                 } else {
                     response = this.sendMessage(ctx, request, mqtraceContext, requestHeader);
                 }
@@ -454,242 +450,6 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
     }
 
     private RemotingCommand sendBatchMessage(final ChannelHandlerContext ctx, //
-                                        final RemotingCommand request, //
-                                        final SendMessageContext sendMessageContext, //
-                                        final SendMessageRequestHeader requestHeader) throws RemotingCommandException {
-
-        final RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
-        final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader) response.readCustomHeader();
-
-
-        response.setOpaque(request.getOpaque());
-
-        response.addExtField(MessageConst.PROPERTY_MSG_REGION, this.brokerController.getBrokerConfig().getRegionId());
-        response.addExtField(MessageConst.PROPERTY_TRACE_SWITCH, String.valueOf(this.brokerController.getBrokerConfig().isTraceOn()));
-
-        if (log.isDebugEnabled()) {
-            log.debug("receive SendMessage request command, " + request);
-        }
-
-        final long startTimstamp = this.brokerController.getBrokerConfig().getStartAcceptSendRequestTimeStamp();
-        if (this.brokerController.getMessageStore().now() < startTimstamp) {
-            response.setCode(ResponseCode.SYSTEM_ERROR);
-            response.setRemark(String.format("broker unable to service, until %s", UtilAll.timeMillisToHumanString2(startTimstamp)));
-            return response;
-        }
-
-        response.setCode(-1);
-        super.msgCheck(ctx, requestHeader, response);
-        if (response.getCode() != -1) {
-            return response;
-        }
-
-        final byte[] body = request.getBody();
-
-        int queueIdInt = requestHeader.getQueueId();
-        TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
-
-        if (queueIdInt < 0) {
-            queueIdInt = Math.abs(this.random.nextInt() % 99999999) % topicConfig.getWriteQueueNums();
-        }
-
-        int sysFlag = requestHeader.getSysFlag();
-        if (TopicFilterType.MULTI_TAG == topicConfig.getTopicFilterType()) {
-            sysFlag |= MessageSysFlag.MULTI_TAGS_FLAG;
-        }
-
-        String newTopic = requestHeader.getTopic();
-        if (null != newTopic && newTopic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
-            String groupName = newTopic.substring(MixAll.RETRY_GROUP_TOPIC_PREFIX.length());
-            SubscriptionGroupConfig subscriptionGroupConfig =
-                    this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(groupName);
-            if (null == subscriptionGroupConfig) {
-                response.setCode(ResponseCode.SUBSCRIPTION_GROUP_NOT_EXIST);
-                response.setRemark(
-                        "subscription group not exist, " + groupName + " " + FAQUrl.suggestTodo(FAQUrl.SUBSCRIPTION_GROUP_NOT_EXIST));
-                return response;
-            }
-
-
-            int maxReconsumeTimes = subscriptionGroupConfig.getRetryMaxTimes();
-            if (request.getVersion() >= MQVersion.Version.V3_4_9.ordinal()) {
-                maxReconsumeTimes = requestHeader.getMaxReconsumeTimes();
-            }
-            int reconsumeTimes = requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes();
-            if (reconsumeTimes >= maxReconsumeTimes) {
-                newTopic = MixAll.getDLQTopic(groupName);
-                queueIdInt = Math.abs(this.random.nextInt() % 99999999) % DLQ_NUMS_PER_GROUP;
-                topicConfig = this.brokerController.getTopicConfigManager().createTopicInSendMessageBackMethod(newTopic, //
-                        DLQ_NUMS_PER_GROUP, //
-                        PermName.PERM_WRITE, 0
-                );
-                if (null == topicConfig) {
-                    response.setCode(ResponseCode.SYSTEM_ERROR);
-                    response.setRemark("topic[" + newTopic + "] not exist");
-                    return response;
-                }
-            }
-        }
-
-        //assign some important fields
-        List<MessageExtBrokerInner> brokerInners = MessageDecoderBrokerInner.decode2MessageExtBrokerInners(ByteBuffer.wrap(body, 0, body.length));
-        for (MessageExtBrokerInner tmpInner: brokerInners) {
-            tmpInner.setTopic(newTopic);
-            MessageAccessor.setProperties(tmpInner, MessageDecoder.string2messageProperties(requestHeader.getProperties()));
-            tmpInner.setTagsCode(MessageExtBrokerInner.tagsString2tagsCode(topicConfig.getTopicFilterType(), tmpInner.getTags()));
-            tmpInner.setQueueId(queueIdInt);
-            tmpInner.setSysFlag(sysFlag);
-            tmpInner.setBornTimestamp(requestHeader.getBornTimestamp());
-            tmpInner.setBornHost(ctx.channel().remoteAddress());
-            tmpInner.setStoreHost(this.getStoreHost());
-            tmpInner.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
-
-        }
-
-        //check some important fields, maybe can be combined with previous assigning logic
-        for (MessageExtBrokerInner tmpInner: brokerInners) {
-            if (this.brokerController.getBrokerConfig().isRejectTransactionMessage()) {
-                String traFlag = tmpInner.getProperty(MessageConst.PROPERTY_TRANSACTION_PREPARED);
-                if (traFlag != null) {
-                    response.setCode(ResponseCode.NO_PERMISSION);
-                    response.setRemark(
-                            "the broker[" + this.brokerController.getBrokerConfig().getBrokerIP1() + "] sending transaction message is forbidden");
-                    return response;
-                }
-            }
-            if (tmpInner.getTopic().length() > Byte.MAX_VALUE) {
-                response.setCode(ResponseCode.MESSAGE_ILLEGAL);
-                response.setRemark("message topic length too long " + tmpInner.getTopic().length());
-                return response;
-            }
-
-            if (tmpInner.getPropertiesString() != null && tmpInner.getPropertiesString().length() > Short.MAX_VALUE) {
-                response.setCode(ResponseCode.MESSAGE_ILLEGAL);
-                response.setRemark("message properties length too long " + tmpInner.getPropertiesString().length());
-                return response;
-            }
-
-        }
-
-
-        //put message one by one
-
-        List<PutMessageResult> putMsgResults = new ArrayList<>(brokerInners.size());
-        boolean putMsgListOk = true;
-        int putListCode = -1;
-        int wroteSize = 0;
-        String msgIds = "";
-        for (MessageExtBrokerInner tmpInner: brokerInners) {
-            PutMessageResult putMessageResult = this.brokerController.getMessageStore().putMessage(tmpInner);
-            //if null, return directly
-            if (putMessageResult == null) {
-                response.setCode(ResponseCode.SYSTEM_ERROR);
-                response.setRemark("store putMessage return null");
-                return response;
-            }
-            switch (putMessageResult.getPutMessageStatus()) {
-                // Success
-                case PUT_OK:
-                    break;
-                case FLUSH_DISK_TIMEOUT:
-                    if (putListCode == -1) putListCode = ResponseCode.FLUSH_DISK_TIMEOUT;
-                    break;
-                case FLUSH_SLAVE_TIMEOUT:
-                    if (putListCode == -1) putListCode = ResponseCode.FLUSH_SLAVE_TIMEOUT;
-                    break;
-                case SLAVE_NOT_AVAILABLE:
-                    if (putListCode == -1) putListCode = ResponseCode.SLAVE_NOT_AVAILABLE;
-                    break;
-                // Failed
-                case CREATE_MAPEDFILE_FAILED:
-                    putMsgListOk = false;
-                    response.setCode(ResponseCode.SYSTEM_ERROR);
-                    response.setRemark("create mapped file failed, server is busy or broken.");
-                    break;
-                case MESSAGE_ILLEGAL:
-                case PROPERTIES_SIZE_EXCEEDED:
-                    putMsgListOk = false;
-                    response.setCode(ResponseCode.MESSAGE_ILLEGAL);
-                    response.setRemark(
-                            "the message is illegal, maybe msg body or properties length not matched. msg body length limit 128k, msg properties length limit 32k.");
-                    break;
-                case SERVICE_NOT_AVAILABLE:
-                    putMsgListOk = false;
-                    response.setCode(ResponseCode.SERVICE_NOT_AVAILABLE);
-                    response.setRemark(
-                            "service not available now, maybe disk full, " + diskUtil() + ", maybe your broker machine memory too small.");
-                    break;
-                case OS_PAGECACHE_BUSY:
-                    putMsgListOk = false;
-                    response.setCode(ResponseCode.SYSTEM_ERROR);
-                    response.setRemark("[PC_SYNCHRONIZED]broker busy, start flow control for a while");
-                    break;
-                case UNKNOWN_ERROR:
-                    putMsgListOk = false;
-                    response.setCode(ResponseCode.SYSTEM_ERROR);
-                    response.setRemark("UNKNOWN_ERROR");
-                    break;
-                default:
-                    putMsgListOk = false;
-                    response.setCode(ResponseCode.SYSTEM_ERROR);
-                    response.setRemark("UNKNOWN_ERROR DEFAULT");
-                    break;
-            }
-            if (putMsgListOk) {
-                wroteSize += putMessageResult.getAppendMessageResult().getWroteBytes();
-                if (msgIds.length() == 0) {
-                    msgIds = putMessageResult.getAppendMessageResult().getMsgId();
-                } else {
-                    msgIds = msgIds + "," + putMessageResult.getAppendMessageResult().getMsgId();
-                }
-                putMsgResults.add(putMessageResult);
-            }
-            if (!putMsgListOk) {
-                break;
-            }
-        }
-
-        String owner = request.getExtFields().get(BrokerStatsManager.COMMERCIAL_OWNER);
-        if (putMsgListOk) {
-            this.brokerController.getBrokerStatsManager().incTopicPutNums(newTopic, brokerInners.size(), 1);
-            this.brokerController.getBrokerStatsManager().incTopicPutSize(newTopic, wroteSize);
-            this.brokerController.getBrokerStatsManager().incBrokerPutNums();
-            response.setCode(putListCode == -1 ? ResponseCode.SUCCESS : putListCode);
-            response.setRemark(null);
-            responseHeader.setMsgId(msgIds);
-            responseHeader.setQueueId(queueIdInt);
-            responseHeader.setQueueOffset(putMsgResults.get(0).getAppendMessageResult().getLogicsOffset());
-
-
-            doResponse(ctx, request, response);
-
-
-            if (hasSendMessageHook()) {
-                sendMessageContext.setMsgId(responseHeader.getMsgId());
-                sendMessageContext.setQueueId(responseHeader.getQueueId());
-                sendMessageContext.setQueueOffset(responseHeader.getQueueOffset());
-
-                int incValue = (int) Math.ceil(wroteSize / BrokerStatsManager.SIZE_PER_COUNT);
-
-                sendMessageContext.setCommercialSendStats(BrokerStatsManager.StatsType.SEND_SUCCESS);
-                sendMessageContext.setCommercialSendTimes(incValue);
-                sendMessageContext.setCommercialSendSize(wroteSize);
-                sendMessageContext.setCommercialOwner(owner);
-            }
-            return null;
-        } else {
-            if (hasSendMessageHook()) {
-                int incValue = (int) Math.ceil(wroteSize / BrokerStatsManager.SIZE_PER_COUNT);
-                sendMessageContext.setCommercialSendStats(BrokerStatsManager.StatsType.SEND_FAILURE);
-                sendMessageContext.setCommercialSendTimes(incValue);
-                sendMessageContext.setCommercialSendSize(wroteSize);
-                sendMessageContext.setCommercialOwner(owner);
-            }
-        }
-        return response;
-    }
-
-    private RemotingCommand sendBatchMessage2(final ChannelHandlerContext ctx, //
                                         final RemotingCommand request, //
                                         final SendMessageContext sendMessageContext, //
                                         final SendMessageRequestHeader requestHeader) throws RemotingCommandException {
