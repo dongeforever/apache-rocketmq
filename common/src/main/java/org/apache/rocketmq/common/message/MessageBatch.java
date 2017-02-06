@@ -59,7 +59,7 @@ public class MessageBatch extends Message implements Iterable<Message> {
             if (first == null) {
                 first = message;
             } else {
-                if (first.getTopic().equals(message.getTopic())) {
+                if (!first.getTopic().equals(message.getTopic())) {
                     throw new UnsupportedOperationException("The topic of the batched messages should be the same");
                 }
                 if (first.isWaitStoreMsgOK() != message.isWaitStoreMsgOK()) {
@@ -69,11 +69,7 @@ public class MessageBatch extends Message implements Iterable<Message> {
             messageList.add(message);
         }
         MessageBatch messageBatch = new MessageBatch(messageList);
-        try {
-            messageBatch.setBody(messageBatch.encode());
-        } catch (Exception e) {
-            throw new RuntimeException("Error in encoding message batch", e);
-        }
+
         messageBatch.setTopic(first.getTopic());
         return messageBatch;
     }

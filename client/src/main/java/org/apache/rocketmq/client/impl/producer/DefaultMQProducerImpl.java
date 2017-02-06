@@ -597,10 +597,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
             byte[] prevBody = msg.getBody();
             try {
                 if (msg instanceof MessageBatch) {
-                    MessageBatch batch = (MessageBatch) msg;
-                    for (Message message : batch) {
-                        MessageClientIDSetter.setUniqID(message);
-                    }
+                   //ID has been set in the generating process
                 } else {
                     MessageClientIDSetter.setUniqID(msg);
                 }
@@ -745,6 +742,10 @@ public class DefaultMQProducerImpl implements MQProducerInner {
     }
 
     private boolean tryToCompressMessage(final Message msg) {
+        if (msg instanceof MessageBatch) {
+            //batch dose not support compressing right now
+            return false;
+        }
         byte[] body = msg.getBody();
         if (body != null) {
             if (body.length >= this.defaultMQProducer.getCompressMsgBodyOverHowmuch()) {

@@ -357,6 +357,11 @@ public class DefaultMessageStore implements MessageStore {
             return new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, null);
         }
 
+        if (messageExtBatch.getBody().length > messageStoreConfig.getMaxMessageSize()) {
+            log.warn("PutMessages body length too long " + messageExtBatch.getBody().length);
+            return new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, null);
+        }
+
         if (this.isOSPageCacheBusy()) {
             return new PutMessageResult(PutMessageStatus.OS_PAGECACHE_BUSY, null);
         }

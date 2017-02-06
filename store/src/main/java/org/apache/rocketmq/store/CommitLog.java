@@ -85,7 +85,6 @@ public class CommitLog {
         this.commitLogService = new CommitRealTimeService();
 
         this.appendMessageCallback = new DefaultAppendMessageCallback(defaultMessageStore.getMessageStoreConfig().getMaxMessageSize());
-        //TODO refactor
         batchEncoders = new ArrayBlockingQueue<MessageExtBatchEncoder>(defaultMessageStore.getMessageStoreConfig().getBatchEncoderNum());
         for (int i = 0; i < defaultMessageStore.getMessageStoreConfig().getBatchEncoderNum(); i++) {
             batchEncoders.add(new MessageExtBatchEncoder(defaultMessageStore.getMessageStoreConfig().getMaxMessageSize()));
@@ -1491,10 +1490,10 @@ public class CommitLog {
                 }
                 messagesByteBuff.position(msgPos + 20);
                 messagesByteBuff.putLong(queueOffset);
-                messagesByteBuff.putLong(wroteOffset + totalMsgLen);
+                messagesByteBuff.putLong(wroteOffset + totalMsgLen - msgLen);
 
                 storeHostBytes.rewind();
-                String msgId = MessageDecoder.createMessageId(this.msgIdMemory, storeHostBytes, wroteOffset + totalMsgLen);
+                String msgId = MessageDecoder.createMessageId(this.msgIdMemory, storeHostBytes, wroteOffset + totalMsgLen - msgLen);
                 if (msgIdBuilder.length() > 0) {
                     msgIdBuilder.append(',').append(msgId);
                 } else {

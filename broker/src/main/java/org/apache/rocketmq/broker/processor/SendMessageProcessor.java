@@ -531,6 +531,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
             return response;
         }
 
+
         MessageExtBatch messageExtBatch = new MessageExtBatch();
         messageExtBatch.setTopic(newTopic);
         messageExtBatch.setBody(request.getBody());
@@ -540,7 +541,6 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         messageExtBatch.setBornHost(ctx.channel().remoteAddress());
         messageExtBatch.setStoreHost(this.getStoreHost());
         messageExtBatch.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
-
 
         PutMessageResult putMessageResult = this.brokerController.getMessageStore().putMessages(messageExtBatch);
         if (putMessageResult != null) {

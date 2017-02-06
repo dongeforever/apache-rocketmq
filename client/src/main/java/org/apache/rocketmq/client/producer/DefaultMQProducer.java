@@ -20,12 +20,14 @@ import java.util.Collection;
 import java.util.List;
 import org.apache.rocketmq.client.ClientConfig;
 import org.apache.rocketmq.client.QueryResult;
+import org.apache.rocketmq.client.Validators;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.client.impl.producer.DefaultMQProducerImpl;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.message.MessageBatch;
+import org.apache.rocketmq.common.message.MessageClientIDSetter;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageId;
@@ -603,6 +605,11 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
         MessageBatch batch;
         try {
             batch = MessageBatch.generateFromList(msgs);
+            for (Message message : batch) {
+                Validators.checkMessage(message, this);
+                MessageClientIDSetter.setUniqID(message);
+            }
+            batch.setBody(batch.encode());
         } catch (Exception e) {
             throw new MQClientException("Batch msgs failed", e);
         }
