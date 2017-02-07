@@ -132,6 +132,8 @@ public class MessageStoreConfig {
     private int transientStorePoolSize = 5;
     private boolean fastFailIfNoBufferInStorePool = false;
 
+    private int batchEncoderNum = Runtime.getRuntime().availableProcessors() * 2;
+
     public boolean isDebugLockEnable() {
         return debugLockEnable;
     }
@@ -628,5 +630,13 @@ public class MessageStoreConfig {
 
     public void setCommitCommitLogThoroughInterval(final int commitCommitLogThoroughInterval) {
         this.commitCommitLogThoroughInterval = commitCommitLogThoroughInterval;
+    }
+
+    public int getBatchEncoderNum() {
+        return batchEncoderNum;
+    }
+
+    public void setBatchEncoderNum(int batchEncoderNum) {
+        this.batchEncoderNum = batchEncoderNum;
     }
 }
