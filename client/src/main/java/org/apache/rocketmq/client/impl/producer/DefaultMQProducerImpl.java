@@ -596,9 +596,8 @@ public class DefaultMQProducerImpl implements MQProducerInner {
 
             byte[] prevBody = msg.getBody();
             try {
-                if (msg instanceof MessageBatch) {
-                   //ID has been set in the generating process
-                } else {
+                //for MessageBatch,ID has been set in the generating process
+                if (!(msg instanceof MessageBatch)) {
                     MessageClientIDSetter.setUniqID(msg);
                 }
 

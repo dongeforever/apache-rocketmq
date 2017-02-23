@@ -641,18 +641,23 @@ public class CommitLog {
         storeStatsService.getSinglePutMessageTopicTimesTotal(msg.getTopic()).incrementAndGet();
         storeStatsService.getSinglePutMessageTopicSizeTotal(topic).addAndGet(result.getWroteBytes());
 
-        GroupCommitRequest request = null;
+        handleDiskFlush(result, putMessageResult, msg);
+        handleHA(result, putMessageResult, msg);
 
+        return putMessageResult;
+    }
+
+    public void handleDiskFlush(AppendMessageResult result, PutMessageResult putMessageResult, MessageExt messageExt) {
         // Synchronization flush
         if (FlushDiskType.SYNC_FLUSH == this.defaultMessageStore.getMessageStoreConfig().getFlushDiskType()) {
             final GroupCommitService service = (GroupCommitService) this.flushCommitLogService;
-            if (msg.isWaitStoreMsgOK()) {
-                request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
+            if (messageExt.isWaitStoreMsgOK()) {
+                GroupCommitRequest request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
                 service.putRequest(request);
                 boolean flushOK = request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
                 if (!flushOK) {
-                    log.error("do groupcommit, wait for flush failed, topic: " + msg.getTopic() + " tags: " + msg.getTags()
-                        + " client address: " + msg.getBornHostString());
+                    log.error("do groupcommit, wait for flush failed, topic: " + messageExt.getTopic() + " tags: " + messageExt.getTags()
+                        + " client address: " + messageExt.getBornHostString());
                     putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_DISK_TIMEOUT);
                 }
             } else {
@@ -667,26 +672,22 @@ public class CommitLog {
                 commitLogService.wakeup();
             }
         }
+    }
 
-        // Synchronous write double
+    public void handleHA(AppendMessageResult result, PutMessageResult putMessageResult, MessageExt messageExt) {
         if (BrokerRole.SYNC_MASTER == this.defaultMessageStore.getMessageStoreConfig().getBrokerRole()) {
             HAService service = this.defaultMessageStore.getHaService();
-            if (msg.isWaitStoreMsgOK()) {
+            if (messageExt.isWaitStoreMsgOK()) {
                 // Determine whether to wait
                 if (service.isSlaveOK(result.getWroteOffset() + result.getWroteBytes())) {
-                    if (null == request) {
-                        request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
-                    }
+                    GroupCommitRequest  request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
                     service.putRequest(request);
-
                     service.getWaitNotifyObject().wakeupAll();
-
                     boolean flushOK =
-                        // TODO
                         request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
                     if (!flushOK) {
-                        log.error("do sync transfer other node, wait return, but failed, topic: " + msg.getTopic() + " tags: "
-                            + msg.getTags() + " client address: " + msg.getBornHostString());
+                        log.error("do sync transfer other node, wait return, but failed, topic: " + messageExt.getTopic() + " tags: "
+                            + messageExt.getTags() + " client address: " + messageExt.getBornHostNameString());
                         putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_SLAVE_TIMEOUT);
                     }
                 }
@@ -698,7 +699,6 @@ public class CommitLog {
             }
         }
 
-        return putMessageResult;
     }
 
     public PutMessageResult putMessages(final MessageExtBatch messageExtBatch) {
@@ -792,62 +792,10 @@ public class CommitLog {
         storeStatsService.getSinglePutMessageTopicTimesTotal(messageExtBatch.getTopic()).addAndGet(result.getMsgNum());
         storeStatsService.getSinglePutMessageTopicSizeTotal(messageExtBatch.getTopic()).addAndGet(result.getWroteBytes());
 
-        GroupCommitRequest request = null;
 
-        // Synchronization flush
-        if (FlushDiskType.SYNC_FLUSH == this.defaultMessageStore.getMessageStoreConfig().getFlushDiskType()) {
-            final GroupCommitService service = (GroupCommitService) this.flushCommitLogService;
-            if (messageExtBatch.isWaitStoreMsgOK()) {
-                request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
-                service.putRequest(request);
-                boolean flushOK = request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
-                if (!flushOK) {
-                    log.error("do groupcommit, wait for flush failed, topic: " + messageExtBatch.getTopic() + " tags: " + messageExtBatch.getTags()
-                        + " client address: " + messageExtBatch.getBornHostString());
-                    putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_DISK_TIMEOUT);
-                }
-            } else {
-                service.wakeup();
-            }
-        }
-        // Asynchronous flush
-        else {
-            if (!this.defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
-                flushCommitLogService.wakeup();
-            } else {
-                commitLogService.wakeup();
-            }
-        }
+        handleDiskFlush(result, putMessageResult, messageExtBatch);
 
-        // Synchronous write double
-        if (BrokerRole.SYNC_MASTER == this.defaultMessageStore.getMessageStoreConfig().getBrokerRole()) {
-            HAService service = this.defaultMessageStore.getHaService();
-            if (messageExtBatch.isWaitStoreMsgOK()) {
-                // Determine whether to wait
-                if (service.isSlaveOK(result.getWroteOffset() + result.getWroteBytes())) {
-                    if (null == request) {
-                        request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes());
-                    }
-                    service.putRequest(request);
-
-                    service.getWaitNotifyObject().wakeupAll();
-
-                    boolean flushOK =
-                        // TODO
-                        request.waitForFlush(this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
-                    if (!flushOK) {
-                        log.error("do sync transfer other node, wait return, but failed, topic: " + messageExtBatch.getTopic() + " tags: "
-                            + messageExtBatch.getTags() + " client address: " + messageExtBatch.getBornHostString());
-                        putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_SLAVE_TIMEOUT);
-                    }
-                }
-                // Slave problem
-                else {
-                    // Tell the producer, slave not available
-                    putMessageResult.setPutMessageStatus(PutMessageStatus.SLAVE_NOT_AVAILABLE);
-                }
-            }
-        }
+        handleHA(result, putMessageResult, messageExtBatch);
 
         return putMessageResult;
     }
@@ -1470,6 +1418,7 @@ public class CommitLog {
                     return new AppendMessageResult(AppendMessageStatus.END_OF_FILE, wroteOffset, maxBlank, msgIdBuilder.toString(), messageExtBatch.getStoreTimestamp(),
                         beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
                 }
+                //move to add queue offset and commitlog offset
                 messagesByteBuff.position(msgPos + 20);
                 messagesByteBuff.putLong(queueOffset);
                 messagesByteBuff.putLong(wroteOffset + totalMsgLen - msgLen);
@@ -1512,13 +1461,10 @@ public class CommitLog {
         private final ByteBuffer hostHolder = ByteBuffer.allocate(8);
 
         MessageExtBatchEncoder(final int size) {
-            this.msgBatchMemory = ByteBuffer.allocate(size);
+            this.msgBatchMemory = ByteBuffer.allocateDirect(size);
             this.maxMessageSize = size;
         }
 
-        public ByteBuffer getMsgStoreItemMemory() {
-            return msgBatchMemory;
-        }
 
         public ByteBuffer encode(final MessageExtBatch messageExtBatch) {
             msgBatchMemory.clear(); //not thread-safe

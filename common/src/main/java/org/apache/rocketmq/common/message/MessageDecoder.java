@@ -386,12 +386,11 @@ public class MessageDecoder {
         short propertiesLength = (short) propertiesBytes.length;
         int sysFlag = message.getFlag();
         int storeSize = 4 // 1 TOTALSIZE
-                    + 4 // 2 MAGICCOD
-                    + 4 // 3 BODYCRC
-                    + 4 // 4 FLAG
-                    + 4 + bodyLen // 4 BODY
-                    + 2 + propertiesLength // 5 propertiesLength
-                    + 0;
+            + 4 // 2 MAGICCOD
+            + 4 // 3 BODYCRC
+            + 4 // 4 FLAG
+            + 4 + bodyLen // 4 BODY
+            + 2 + propertiesLength;
         ByteBuffer byteBuffer = ByteBuffer.allocate(storeSize);
         // 1 TOTALSIZE
         byteBuffer.putInt(storeSize);

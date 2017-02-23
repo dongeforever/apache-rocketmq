@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import org.apache.rocketmq.common.MixAll;
 
 public class MessageBatch extends Message implements Iterable<Message> {
 
@@ -34,20 +35,11 @@ public class MessageBatch extends Message implements Iterable<Message> {
         return MessageDecoder.encodeMessages(messages);
     }
 
-
-    public void addMessage(Message message) {
-        assert message != null;
-        if (message.getDelayTimeLevel() > 0) {
-            throw new UnsupportedOperationException("TimeDelayLevel in not supported for batching");
-        }
-        messages.add(message);
-    }
-
     public Iterator<Message> iterator() {
         return messages.iterator();
     }
 
-    public static MessageBatch generateFromList(Collection<Message> messages) throws Exception {
+    public static MessageBatch generateFromList(Collection<Message> messages) {
         assert messages != null;
         assert messages.size() > 0;
         List<Message> messageList = new ArrayList<>(messages.size());
@@ -55,6 +47,9 @@ public class MessageBatch extends Message implements Iterable<Message> {
         for (Message message : messages) {
             if (message.getDelayTimeLevel() > 0) {
                 throw new UnsupportedOperationException("TimeDelayLevel in not supported for batching");
+            }
+            if (message.getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
+                throw new UnsupportedOperationException("Retry Group is not supported for batching");
             }
             if (first == null) {
                 first = message;
@@ -71,6 +66,7 @@ public class MessageBatch extends Message implements Iterable<Message> {
         MessageBatch messageBatch = new MessageBatch(messageList);
 
         messageBatch.setTopic(first.getTopic());
+        messageBatch.setWaitStoreMsgOK(first.isWaitStoreMsgOK());
         return messageBatch;
     }
 

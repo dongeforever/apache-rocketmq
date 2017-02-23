@@ -51,7 +51,7 @@ public class BatchSendIT extends BaseConf {
     }
 
     @Test
-    public void testBatchSend() throws Exception {
+    public void testBatchSend_ViewMessage() throws Exception {
         List<Message> messageList = new ArrayList<>();
         int batchNum = 100;
         for (int i = 0; i < batchNum; i++) {
@@ -75,6 +75,57 @@ public class BatchSendIT extends BaseConf {
         for (int i = 0; i < 3; i++) {
             producer.viewMessage(topic, msgIds[random.nextInt(batchNum)]);
         }
+    }
+
+
+    @Test
+    public void testBatchSend_CheckProperties() throws Exception {
+        List<Message> messageList = new ArrayList<>();
+        Message message = new Message();
+        message.setTopic(topic);
+        message.setKeys("keys123");
+        message.setTags("tags123");
+        message.setWaitStoreMsgOK(false);
+        message.setBuyerId("buyerid123");
+        message.setFlag(123);
+        message.setBody("body".getBytes());
+        messageList.add(message);
+
+
+        DefaultMQProducer producer = ProducerFactory.getRMQProducer(nsAddr);
+        SendResult sendResult = producer.send(messageList);
+        Assert.assertEquals(SendStatus.SEND_OK, sendResult.getSendStatus());
+
+        String[] offsetIds = sendResult.getOffsetMsgId().split(",");
+        String[] msgIds = sendResult.getMsgId().split(",");
+        Assert.assertEquals(messageList.size(), offsetIds.length);
+        Assert.assertEquals(messageList.size(), msgIds.length);
+
+        Thread.sleep(2000);
+
+        Message messageByOffset = producer.viewMessage(offsetIds[0]);
+        Message messageByMsgId = producer.viewMessage(topic, msgIds[0]);
+
+        System.out.println(messageByOffset);
+        System.out.println(messageByMsgId);
+
+        Assert.assertEquals(message.getTopic(), messageByMsgId.getTopic());
+        Assert.assertEquals(message.getTopic(), messageByOffset.getTopic());
+
+        Assert.assertEquals(message.getKeys(), messageByOffset.getKeys());
+        Assert.assertEquals(message.getKeys(), messageByMsgId.getKeys());
+
+        Assert.assertEquals(message.getTags(), messageByOffset.getTags());
+        Assert.assertEquals(message.getTags(), messageByMsgId.getTags());
+
+        Assert.assertEquals(message.isWaitStoreMsgOK(), messageByOffset.isWaitStoreMsgOK());
+        Assert.assertEquals(message.isWaitStoreMsgOK(), messageByMsgId.isWaitStoreMsgOK());
+
+        Assert.assertEquals(message.getBuyerId(), messageByOffset.getBuyerId());
+        Assert.assertEquals(message.getBuyerId(), messageByMsgId.getBuyerId());
+
+        Assert.assertEquals(message.getFlag(), messageByOffset.getFlag());
+        Assert.assertEquals(message.getFlag(), messageByMsgId.getFlag());
     }
 
 }
