@@ -1435,7 +1435,9 @@ public class CommitLog {
                 messagesByteBuff.position(msgPos + msgLen);
             }
 
-            byteBuffer.put(messagesByteBuff.array(), 0, totalMsgLen);
+            messagesByteBuff.position(0);
+            messagesByteBuff.limit(totalMsgLen);
+            byteBuffer.put(messagesByteBuff);
             messageExtBatch.setEncodedBuff(null);
             AppendMessageResult result = new AppendMessageResult(AppendMessageStatus.PUT_OK, wroteOffset, totalMsgLen, msgIdBuilder.toString(),
                 messageExtBatch.getStoreTimestamp(), beginQueueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
