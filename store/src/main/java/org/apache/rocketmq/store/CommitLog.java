@@ -703,7 +703,7 @@ public class CommitLog {
 
     public PutMessageResult putMessages(final MessageExtBatch messageExtBatch) {
         messageExtBatch.setStoreTimestamp(System.currentTimeMillis());
-        AppendMessageResult result = null;
+        AppendMessageResult result;
 
         StoreStatsService storeStatsService = this.defaultMessageStore.getStoreStatsService();
 
@@ -738,7 +738,7 @@ public class CommitLog {
                 mappedFile = this.mappedFileQueue.getLastMappedFile(0); // Mark: NewFile may be cause noise
             }
             if (null == mappedFile) {
-                log.error("Create maped file1 error, topic: " + messageExtBatch.getTopic() + " clientAddr: " + messageExtBatch.getBornHostString());
+                log.error("Create maped file1 error, topic: {} clientAddr: {}", messageExtBatch.getTopic(), messageExtBatch.getBornHostString());
                 beginTimeInLock = 0;
                 return new PutMessageResult(PutMessageStatus.CREATE_MAPEDFILE_FAILED, null);
             }
@@ -753,7 +753,7 @@ public class CommitLog {
                     mappedFile = this.mappedFileQueue.getLastMappedFile(0);
                     if (null == mappedFile) {
                         // XXX: warn and notify me
-                        log.error("Create maped file2 error, topic: " + messageExtBatch.getTopic() + " clientAddr: " + messageExtBatch.getBornHostString());
+                        log.error("Create maped file2 error, topic: {} clientAddr: {}", messageExtBatch.getTopic(), messageExtBatch.getBornHostString());
                         beginTimeInLock = 0;
                         return new PutMessageResult(PutMessageStatus.CREATE_MAPEDFILE_FAILED, result);
                     }

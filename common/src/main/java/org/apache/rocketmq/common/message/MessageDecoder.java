@@ -376,7 +376,7 @@ public class MessageDecoder {
     }
 
 
-    public static byte[] encodeMessage(Message message) throws Exception {
+    public static byte[] encodeMessage(Message message) {
         //only need flag, body, properties
         byte[] body = message.getBody();
         int bodyLen = body.length;
@@ -447,7 +447,7 @@ public class MessageDecoder {
         return message;
     }
 
-    public static byte[] encodeMessages(List<Message> messages) throws Exception {
+    public static byte[] encodeMessages(List<Message> messages) {
         //TO DO refactor, accumulate in one buffer, avoid copies
         List<byte[]>  encodedMessages = new ArrayList<>(messages.size());
         int allSize = 0;

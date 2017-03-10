@@ -74,7 +74,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 mqtraceContext = buildMsgContext(ctx, requestHeader);
                 this.executeSendMessageHookBefore(ctx, request, mqtraceContext);
 
-                RemotingCommand response = null;
+                RemotingCommand response;
                 if (requestHeader.isBatch()) {
                     response = this.sendBatchMessage(ctx, request, mqtraceContext, requestHeader);
                 } else {
@@ -478,7 +478,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         response.addExtField(MessageConst.PROPERTY_MSG_REGION, this.brokerController.getBrokerConfig().getRegionId());
         response.addExtField(MessageConst.PROPERTY_TRACE_SWITCH, String.valueOf(this.brokerController.getBrokerConfig().isTraceOn()));
 
-        log.debug("receive SendMessage request command, " + request);
+        log.debug("Receive SendMessage request command {}", request);
 
         final long startTimstamp = this.brokerController.getBrokerConfig().getStartAcceptSendRequestTimeStamp();
         if (this.brokerController.getMessageStore().now() < startTimstamp) {
@@ -509,7 +509,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
         if (requestHeader.getTopic() != null && requestHeader.getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
             response.setCode(ResponseCode.MESSAGE_ILLEGAL);
-            response.setRemark("Batch dose not support retry group "  + requestHeader.getTopic());
+            response.setRemark("batch request does not support retry group "  + requestHeader.getTopic());
             return response;
         }
         MessageExtBatch messageExtBatch = new MessageExtBatch();

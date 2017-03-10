@@ -602,18 +602,18 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     }
 
     private MessageBatch batch(Collection<Message> msgs) throws MQClientException {
-        MessageBatch batch;
+        MessageBatch msgBatch;
         try {
-            batch = MessageBatch.generateFromList(msgs);
-            for (Message message : batch) {
+            msgBatch = MessageBatch.generateFromList(msgs);
+            for (Message message : msgBatch) {
                 Validators.checkMessage(message, this);
                 MessageClientIDSetter.setUniqID(message);
             }
-            batch.setBody(batch.encode());
+            msgBatch.setBody(msgBatch.encode());
         } catch (Exception e) {
-            throw new MQClientException("Batch msgs failed", e);
+            throw new MQClientException("Failed to initiate the MessageBatch", e);
         }
-        return batch;
+        return msgBatch;
     }
     public String getProducerGroup() {
         return producerGroup;
